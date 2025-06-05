@@ -1,0 +1,350 @@
+#include <iostream>
+#include <unistd.h>
+#include <cstring>
+#include <cstdlib>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/select.h>
+#include <arpa/inet.h>
+#include <map>
+#include <vector>
+#include <sstream>
+
+
+// Constants
+#define PORT 3333
+#define BACKLOG 5//how many pending connections the queue will hold
+#define BUFFER_SIZE 1024// size of the buffer for reading and writing
+#define MAX_CLIENTS 25
+#define MAX_CAPACITY 1000000000000000000ULL
+
+using namespace std;
+
+/*
+    * Function to get a molecule from the bank.
+    * It checks if the required atoms are available in sufficient quantity.
+    * If available, it deducts the required atoms from the bank and returns true.
+    * If not available, it returns false.
+    * @param input_name: The name of the molecule to be created. 
+    * @param quantity: The quantity of the molecule to be created.
+    * @param bank: A map representing the available atoms in the bank.
+    * @return: true if the molecule can be created, false otherwise.
+*/
+bool get_molecule(const string& input_name, unsigned long long quantity, map<string, unsigned long long>& bank) {
+    map<string, map<string, int>> molecules = {
+        {"H2O", {{"HYDROGEN", 2}, {"OXYGEN", 1}}},
+        {"CO2", {{"CARBON", 1}, {"OXYGEN", 2}}},
+        {"C6H12O6", {{"CARBON", 6}, {"HYDROGEN", 12}, {"OXYGEN", 6}}},
+        {"C2H6O", {{"CARBON", 2}, {"HYDROGEN", 6}, {"OXYGEN", 1}}}
+    };
+
+    map<string, string> aliases = {//mapping common names to their chimical formoula
+        {"WATER", "H2O"},
+        {"GLUCOSE", "C6H12O6"},
+        {"ETHANOL", "C2H6O"},
+        {"CARBON DIOXIDE", "CO2"}
+    };
+
+    string molecule = input_name;
+    if (aliases.find(input_name) != aliases.end()) {// check if the input name is an alias
+        molecule = aliases[input_name];
+    }
+
+    if (molecules.find(molecule) == molecules.end()) {//if no found return false
+        cerr << "Unknown molecule: " << molecule << endl;
+        return false;
+    }
+
+    const auto& required_atoms = molecules[molecule];
+
+    for (const auto& pair : required_atoms) {// check if the required atoms are available in sufficient quantity
+        const string& atom = pair.first;
+        unsigned long long amount = pair.second;
+        unsigned long long needed = static_cast<unsigned long long>(amount) * quantity;
+        if (bank[atom] < needed) {
+            return false;
+        }
+    }
+
+    for (const auto& pair : required_atoms) {// deduct the required atoms from the bank
+        const string& atom = pair.first;
+        unsigned long long amount = pair.second;
+        bank[atom] -= static_cast<unsigned long long>(amount) * quantity;
+    }
+
+    return true;
+}
+
+
+int main(int argc, char *argv[]) {
+    if(argc!=3){//check if the number of arguments is correct
+        std::cerr << "Usage: " << argv[0] << " <port> <UDP port>\n";
+        return 1;
+    }
+    int port = atoi(argv[1]);//take the port number from the command line argument
+    int udp_port = atoi(argv[2]);//take the port number from the command line argument
+    int num_clients = 0; // to count the number of clients
+
+
+    vector<string> mol_bank = {{"WATER"}, {"CARBON DIOXIDE"}, {"ALCOHOL"}, {"GLUCOSE"}};
+
+    map<string,unsigned long long> bank={{"CARBON", 0}, {"OXYGEN", 0}, {"HYDROGEN", 0}}; //atoms bank structure
+
+    int udp_socket;// int for UDP socket
+    struct sockaddr_in udp_addr;
+
+    int server_fd, new_socket, client_socket[MAX_CLIENTS]={0};// int of file descriptor array to hold client sockets
+    struct sockaddr_in address;// struct to hold the address of the server
+    socklen_t addrlen = sizeof(address);// length of the address structure
+    fd_set read_fds; // set of sockets for reading
+    char buffer[BUFFER_SIZE] = {0}; // buffer for reading and writing
+
+    // create TCP socket
+    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
+        perror("socket creation failed");
+        return 1;
+    }
+   
+    address.sin_family = AF_INET;// IPv4
+    address.sin_addr.s_addr = INADDR_ANY; // local address
+    address.sin_port = htons(port); // convert port to network byte order
+
+    // bind the socket to the address and port
+    if(bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
+        perror("bind failed");
+        return 1;
+    }
+
+    // listen for incoming connections
+    if (listen(server_fd, BACKLOG) < 0) {
+        perror("listen");
+        return 1;
+    }
+
+    cout << "atom_Warehouse server is listening on port " << port << "...\n";
+
+    // create UDP socket
+    if ((udp_socket = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+        perror("UDP socket creation failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // set up the address structure
+    udp_addr.sin_family = AF_INET;
+    udp_addr.sin_addr.s_addr = INADDR_ANY;
+    udp_addr.sin_port = htons(udp_port); // port received from user
+
+
+    // bind the UDP socket to the address and port
+    if(bind(udp_socket, (struct sockaddr*)&udp_addr, sizeof(udp_addr)) < 0) {
+        perror("UDP bind failed");
+        close(udp_socket);
+        exit(EXIT_FAILURE);
+    }
+
+    cout << "UDP server is listening on port " << udp_port << "...\n";
+
+    // main loop to accept and handle client connections
+    while (true) {
+
+        FD_ZERO(&read_fds); // reset the set 
+        FD_SET(server_fd, &read_fds); // add the server socket 
+
+        FD_SET(udp_socket, &read_fds); // add the UDP socket
+        int max_sd = server_fd; // the maximum socket
+
+        for (int i = 0; i < num_clients; i++) {// loop through the client sockets and add them to the set
+            int sd = client_socket[i];
+            if (sd > 0) FD_SET(sd, &read_fds);
+            if (sd > max_sd){ max_sd = sd;} // update max
+        }
+
+        if (udp_socket > max_sd) {max_sd = udp_socket;} // update max if UDP socket is larger
+
+        int activity =select(max_sd + 1, &read_fds, nullptr, nullptr, nullptr);// wait for activity on the sockets
+        if (activity < 0) {//mean that there no activity on the sockets
+            perror("select error");
+            continue;
+        }
+
+        // check if there is activity on the server socket
+        if(FD_ISSET(server_fd, &read_fds)) {
+            if((new_socket = accept(server_fd, (struct sockaddr*)&address, &addrlen)) < 0) {
+                perror("accept");
+                continue;
+            }
+            cout << "New client connected to socket: " << new_socket << "\n";
+            // If there is activity on the server socket, then there is a new client
+            if(num_clients > MAX_CLIENTS) {
+                std::cerr << "Maximum number of clients reached. Cannot accept new client.\n";
+                close(new_socket); // close the socket if max clients reached
+                break;;
+            }
+
+            //bool add = false;
+            // Add to the list client sockets
+            client_socket[num_clients] = new_socket; // add the new socket to the client sockets array
+            num_clients++;// increment the number of clients
+
+            cout << "Client added to the list of sockets.\n";
+        }
+
+        for (int i=0;i<num_clients;i++) {
+            if (FD_ISSET(client_socket[i], &read_fds)) {
+                // If there is activity on the client socket
+                new_socket = client_socket[i];   
+                    
+                int valread = read(new_socket, buffer, BUFFER_SIZE);// read data from the client
+                if(valread <= 0) {
+                    cout<<"Client disconnected from socket: " << new_socket << "\n";
+                    close(new_socket);
+                    client_socket[i] = client_socket[num_clients - 1]; // remove the client from the list
+                    client_socket[num_clients - 1] = 0; // clear the last socket
+                    num_clients--;
+                }
+                else{// if there is data from the client
+                    buffer[valread] = '\0'; 
+                    cout << "Received from client: " << buffer << endl;
+
+                    string a, type;
+                    long long temp_quantity;//to hold the quantity temporarily and handle negative values
+                    stringstream ss(buffer);
+                    ss >> a >> type >> temp_quantity; // divide to parts
+                    string response;
+
+                    // validate input
+                    if (ss.fail()||temp_quantity< 0) {// check if the input is valid
+                        response = "Error: invalid quantity.\n";
+                        send(new_socket, response.c_str(), response.length(), 0);
+                        cerr << "Invalid quantity received from client: " << buffer << endl;
+                        continue;
+                    }
+                    unsigned long long quantity = static_cast<unsigned long long>(temp_quantity);
+
+                    if(a=="ADD"&&bank.count(type)){// check if the command is ADD and the atom type is valid
+                        if(bank[type] + quantity <= MAX_CAPACITY) {// check if the quantity is within the maximum capacity
+                            bank[type] += quantity;//add the quantity to the bank
+                            string response= "Added\n";
+                            send(new_socket, response.c_str(), response.length(), 0);
+                        }                            
+                        else {// if the quantity is over the maximum capacity
+                            response = "Error: get over of maximum capacity.\n";
+                            send(new_socket, response.c_str(), response.length(), 0);
+                        }
+                        cout<< "Current bank status:\n";//for get info of the bank
+                        for (const auto& k : bank) {
+                            cout << k.first << ": " << k.second << endl;
+                        }
+                    } 
+                    else {// if the command is not like the format that we expect
+                        response = "Error: invalid command or atom type, Usage: ADD <atom_type_(capital)> <quantity>\n";
+                        send(new_socket, response.c_str(), response.length(), 0);//send response to client
+                        cerr << "Received invalid command from client: " << buffer << endl;
+                    }
+
+                }
+            }
+        }
+
+
+        // check if there is activity on the UDP socket
+        if(FD_ISSET(udp_socket, &read_fds)) {
+            char udp_buffer[BUFFER_SIZE];
+            struct sockaddr_in udp_client_addr;
+            socklen_t udp_addr_len = sizeof(udp_client_addr);
+
+            int udp_valread = recvfrom(udp_socket, udp_buffer, BUFFER_SIZE, 0, (struct sockaddr*)&udp_client_addr, &udp_addr_len);//using recvfrom to receive data from the UDP socket
+            if (udp_valread < 0) {
+                perror("recvfrom");
+                continue;
+            }
+            udp_buffer[udp_valread] = '\0'; // null-terminate the buffer
+            cout << "Received UDP message: " << udp_buffer << "\n";
+
+            // Parse the UDP message in a clever way
+            //first we get the DELIVER command then the molecule name and after the quantity- while the molecule name can be multiple words
+
+            string input(udp_buffer);
+            istringstream iss(input);
+
+
+            string a;
+            iss>>a;
+
+            if (a != "DELIVER") {
+                string response = "Error: invalid command - Usage: DELIVER <molecule_name> <quantity>\n";
+                sendto(udp_socket, response.c_str(), response.length(), 0,
+                    (struct sockaddr*)&udp_client_addr, udp_addr_len);
+                cerr << "Invalid command from UDP client: " << udp_buffer << endl;
+                continue;
+            }
+
+            string rest;// to hold the rest of the line after the command
+            getline(iss, rest); // get the rest of the line after the command
+            istringstream rest_iss(rest);
+            vector<string> tokens;
+            string token;
+
+            while(rest_iss>>token) {// split the item by spaces
+                tokens.push_back(token);
+            }
+            if(tokens.size() < 2) {// check if the item is valid
+                string response = "Error: invalid molecule name or quantity - Usage: DELIVER <molecule_name> <quantity>\n";
+                sendto(udp_socket, response.c_str(), response.length(), 0, (struct sockaddr*)&udp_client_addr, udp_addr_len);
+                cerr << "Received invalid molecule name from UDP client: " << udp_buffer << endl;
+                continue;
+            }
+
+            // The last token is the quantity, and the rest is the molecule name
+            string quantity_str = tokens.back();
+            tokens.pop_back();
+            unsigned long long quantity;
+            try {
+                quantity = stoull(quantity_str);
+            } catch (...) {
+                string response = "Error: invalid quantity.\n";
+                sendto(udp_socket, response.c_str(), response.length(), 0,
+                    (struct sockaddr*)&udp_client_addr, udp_addr_len);
+                cerr << "Invalid quantity from UDP client: " << udp_buffer << endl;
+                continue;
+            }
+
+            string item; // the first token is the molecule name
+            for (size_t i = 0; i < tokens.size(); ++i) {
+                if (i > 0) item += " ";
+                item += tokens[i];
+            }
+            string molecule; // to hold the molecule name
+
+            if(item=="WATER"){molecule="H2O";} // map the name to the molecule
+            else if(item=="CARBON DIOXIDE"){molecule="CO2";}
+            else if(item=="ALCOHOL"){molecule="C2H6O";}
+            else if(item=="GLUCOSE"){molecule="C6H12O6";}
+            else {
+                string response = "Error: invalid molecule name. Valid names are: WATER, CARBON DIOXIDE, ALCOHOL, GLUCOSE.\n";
+                sendto(udp_socket, response.c_str(), response.length(), 0, (struct sockaddr*)&udp_client_addr, udp_addr_len);
+                cerr << "Received invalid molecule name from UDP client: " << udp_buffer << endl;
+                continue;
+            }
+
+            bool c=get_molecule(molecule, quantity, bank);// check if we can get the molecule
+            if(!c) {
+                cout << "Not enough atoms to create molecule " << molecule << ".\n";
+            }
+
+            string s;
+            if(c){s= "Delivered " + to_string(quantity) + " " + item + "\n";}
+            else{s= "Error: not enough atoms to deliver ""\n";}
+            sendto(udp_socket, s.c_str(), s.length(), 0, (struct sockaddr*)&udp_client_addr, udp_addr_len);
+
+            cout<<"Current bank status after UDP delivery:\n";//to get info of the bank
+            for (const auto& k : bank) {
+                cout << k.first << ": " << k.second << endl;
+            }
+        }
+    }
+    close(server_fd);
+    close(udp_socket);
+    return 0;
+}
