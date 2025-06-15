@@ -62,7 +62,7 @@ bool get_molecule(const string& input_name, unsigned long long quantity, map<str
     for (const auto& pair : required_atoms) {// check if the required atoms are available in sufficient quantity
         const string& atom = pair.first;
         unsigned long long amount = pair.second;
-        unsigned long long needed = static_cast<unsigned long long>(amount) * quantity;
+        unsigned long long needed = static_cast<unsigned long long>(amount) * quantity;//using static_cast to convert the int to unsigned long long
         if (bank[atom] < needed) {
             return false;
         }
@@ -108,6 +108,75 @@ unsigned long long get_amount(const  string& s, const map<string, unsigned long 
 void timeout_handler(int) {
     cerr << "Server timed out. Exiting...\n";
     exit(1);// exit the program if the timeout is reached
+}
+
+/**
+ * Function to parse the command and execute it.
+ * It checks if the command is valid and if the required atoms are available in the bank.
+ * If valid, it returns a success message, otherwise an error message.
+ * @param com: The command string to be parsed.
+ * @param bank: A map representing the available atoms in the bank.
+ * @return: A string containing the result of the command execution.
+ */
+string parse_command(const string& com, map<string,unsigned long long>& bank){
+    istringstream iss(com);
+    string command;
+    iss >> command;// get the command from the input string
+
+    if (command != "DELIVER") {
+        return "Error: invalid command - Usage: DELIVER <molecule_name> <quantity>\n";
+    }
+
+    string rest;// get the rest of the command after DELIVER
+    getline(iss, rest);
+    istringstream rest_iss(rest);
+    vector<string> tokens;
+    string token;
+
+    while (rest_iss >> token) {// split the rest of the command into tokens
+        tokens.push_back(token);
+    }
+
+    if (tokens.size() < 2) {
+        return "Error: invalid molecule name or quantity - Usage: DELIVER <molecule_name> <quantity>\n";
+    }
+
+    string quantity_str = tokens.back();
+    tokens.pop_back();
+
+    unsigned long long quantity;
+    try {
+        quantity = stoull(quantity_str);// stoull is used to convert the string to unsigned long long
+    } catch (...) {
+        return "Error: invalid quantity.\n";
+    }
+
+    string item;
+    for (size_t i = 0; i < tokens.size(); ++i) {// get the molecule name from the tokens
+        if (i > 0) item += " ";
+        item += tokens[i];
+    }
+
+    string molecule;
+    // map the molecule name to its chemical formula
+    if (item == "WATER") molecule = "H2O";
+    else if (item == "CARBON DIOXIDE") molecule = "CO2";
+    else if (item == "ALCOHOL") molecule = "C2H6O";
+    else if (item == "GLUCOSE") molecule = "C6H12O6";
+    else {
+        return "Error: invalid molecule name. Valid names are: WATER, CARBON DIOXIDE, ALCOHOL, GLUCOSE.\n";
+    }
+
+    bool success = get_molecule(molecule, quantity, bank);// check if the molecule can be created with the available atoms in the bank
+    if (success) {//print the success message if the molecule can be created
+        cout << "Delivered " << quantity << " " << item << ", Current bank status:\n";
+        for (const auto& pair : bank) {// print the current status of the bank
+            cout <<" "<< pair.first << ": " << pair.second << endl;
+        }
+        return "Delivered " + to_string(quantity) + " " + item + "\n";
+    } else {
+        return "Error: not enough atoms to deliver\n";
+    }
 }
 
 int main(int argc, char *argv[]) {
@@ -185,11 +254,11 @@ int main(int argc, char *argv[]) {
                     return 1;
                 }
                 break;
-            case 's':
+            case 's':// UDS stream path
                 uds_stream_path = optarg;
                 has_uds_stream = true;
                 break;
-            case 'd':
+            case 'd':// UDS datagram path
                 uds_dgram_path = optarg;
                 has_uds_dgram = true;
                 break;
@@ -224,15 +293,12 @@ int main(int argc, char *argv[]) {
     cerr << "Error: Cannot use both TCP and UDS stream (or UDP and UDS datagram).\n";
     return 1;
     }
-    if (!has_tcp && !has_uds_stream) {
-        cerr << "Error: Must provide either TCP port (-T) or UDS stream path (-s).\n";
-        return 1;
-    }
-    if (!has_udp && !has_uds_dgram) {
-        cerr << "Error: Must provide either UDP port (-U) or UDS datagram path (-d).\n";
-        return 1;
-    }
 
+    //The user can choose what to use with- he can use TCP, UDP, UDS stream or UDS datagram I'm not prohibited this option
+    // if (!has_tcp && !has_uds_stream) {
+    //     cerr << "Error: Must provide either TCP port (-T) or UDS stream path (-s).\n";
+    //     return 1;
+    // }
 
     map<string,unsigned long long> bank={{"CARBON", 0}, {"OXYGEN", 0}, {"HYDROGEN", 0}}; //atoms bank structure
 
@@ -353,7 +419,6 @@ int main(int argc, char *argv[]) {
     }
 
 
-
     // main loop to accept and handle client connections
     while (true) {
 
@@ -410,9 +475,8 @@ int main(int argc, char *argv[]) {
             int bytes = recvfrom(uds_dgram_fd, uds_buffer, BUFFER_SIZE, 0, (struct sockaddr*)&client_addr, &client_len);// receive data from the UDS datagram socket
             if (bytes > 0) {
                 uds_buffer[bytes] = '\0';
-                // parse and process as you do in UDP...
-                // send response back:
-                string response = "UDS response";
+                // send response back
+                string response = parse_command(uds_buffer, bank);// parse the command and get the response
                 sendto(uds_dgram_fd, response.c_str(), response.length(), 0, (struct sockaddr*)&client_addr, client_len);// send response to the client
             }
         }
@@ -488,85 +552,10 @@ int main(int argc, char *argv[]) {
             udp_buffer[udp_valread] = '\0'; // null-terminate the buffer
             cout << "Received UDP message: " << udp_buffer << "\n";
 
-            // Parse the UDP message in a clever way
-            //first we get the DELIVER command then the molecule name and after the quantity- while the molecule name can be multiple words
+            string response = parse_command(udp_buffer, bank);
 
-            string input(udp_buffer);
-            istringstream iss(input);
-
-            string a;
-            iss>>a;
-
-            if (a != "DELIVER") {
-                string response = "Error: invalid command - Usage: DELIVER <molecule_name> <quantity>\n";
-                sendto(udp_socket, response.c_str(), response.length(), 0,
-                    (struct sockaddr*)&udp_client_addr, udp_addr_len);
-                cerr << "Invalid command from UDP client: " << udp_buffer << endl;
-                continue;
-            }
-
-            string rest;// to hold the rest of the line after the command
-            getline(iss, rest); // get the rest of the line after the command
-            istringstream rest_iss(rest);
-            vector<string> tokens;// to hold the tokens of the line
-            string token;
-
-            while(rest_iss>>token) {// split the item by spaces
-                tokens.push_back(token);
-            }
-            if(tokens.size() < 2) {// check if the item is valid
-                string response = "Error: invalid molecule name or quantity - Usage: DELIVER <molecule_name> <quantity>\n";
-                sendto(udp_socket, response.c_str(), response.length(), 0, (struct sockaddr*)&udp_client_addr, udp_addr_len);
-                cerr << "Received invalid molecule name from UDP client: " << udp_buffer << endl;
-                continue;
-            }
-
-            // The last token is the quantity, and the rest is the molecule name
-            string quantity_str = tokens.back();
-            tokens.pop_back();
-            unsigned long long quantity;
-            try {
-                quantity = stoull(quantity_str);
-            } catch (...) {
-                string response = "Error: invalid quantity.\n";
-                sendto(udp_socket, response.c_str(), response.length(), 0,
-                    (struct sockaddr*)&udp_client_addr, udp_addr_len);
-                cerr << "Invalid quantity from UDP client: " << udp_buffer << endl;
-                continue;
-            }
-
-            string item; // the first token is the molecule name
-            for (size_t i = 0; i < tokens.size(); ++i) {
-                if (i > 0) item += " ";
-                item += tokens[i];
-            }
-            string molecule; // to hold the molecule name
-
-            if(item=="WATER"){molecule="H2O";} // map the name to the molecule
-            else if(item=="CARBON DIOXIDE"){molecule="CO2";}
-            else if(item=="ALCOHOL"){molecule="C2H6O";}
-            else if(item=="GLUCOSE"){molecule="C6H12O6";}
-            else {
-                string response = "Error: invalid molecule name. Valid names are: WATER, CARBON DIOXIDE, ALCOHOL, GLUCOSE.\n";
-                sendto(udp_socket, response.c_str(), response.length(), 0, (struct sockaddr*)&udp_client_addr, udp_addr_len);
-                cerr << "Received invalid molecule name from UDP client: " << udp_buffer << endl;
-                continue;
-            }
-
-            bool c=get_molecule(molecule, quantity, bank);// check if we can get the molecule
-            if(!c) {
-                cout << "Not enough atoms to create molecule " << molecule << ".\n";
-            }
-
-            string s;
-            if(c){s= "Delivered " + to_string(quantity) + " " + item + "\n";}
-            else{s= "Error: not enough atoms to deliver ""\n";}
-            sendto(udp_socket, s.c_str(), s.length(), 0, (struct sockaddr*)&udp_client_addr, udp_addr_len);
-
-            cout<<"Current bank status after UDP delivery:\n";//to get info of the bank
-            for (const auto& k : bank) {
-                cout << k.first << ": " << k.second << endl;
-            }
+            sendto(udp_socket, response.c_str(), response.length(), 0,
+                (struct sockaddr*)&udp_client_addr, udp_addr_len);
         }
 
         for (int i=0;i<num_clients;i++) {
@@ -624,9 +613,7 @@ int main(int argc, char *argv[]) {
 
                 }
             }
-        }
-        
-        
+        } 
     }
 
     // Close all client sockets

@@ -8,10 +8,7 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <algorithm> // for to lower case conversion
-
 #include <sys/un.h>// for UNIX domain sockets
-
-
 
 // Constants
 #define BUFFER_SIZE 1024// size of the buffer for reading and writing
@@ -43,7 +40,7 @@ int main(int argc, char *argv[]) {
     }
 
     if ((host_name || port) && uds_path) {// Check if both host name/port and UDS path are provided
-        cerr << "Error: Cannot use both IP/port and UDS path.\n";
+        cerr << "Error: Cannot use both IP/port and UDS path\n";
         return 1;
     }
     // Check if either UDS path or host name/port is provided
@@ -52,59 +49,56 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // if (!host_name || !port) {// Check if both host name and port are specified
-    //     cerr << "Usage: " << argv[0] << " -h <host_name_or_ip> -p <port>\n";
-    //     return 1;
-    // }
-
-    struct addrinfo hints, *res;//using addrinfo structure to hold the resolved address
-    memset(&hints, 0, sizeof(hints)); // clear the hints structure
-    hints.ai_family = AF_INET; // IPv4
-    hints.ai_socktype = SOCK_STREAM; // TCP socket
-
-    int status = getaddrinfo(host_name, port, &hints, &res); // resolve the host name or IP address
-
-    if (status != 0) {// check if getaddrinfo was successful
-        cerr << "getaddrinfo failed: " << gai_strerror(status) << endl;
-        return 1;
-    }
-
-    // create a socket
-    int new_socket = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (new_socket < 0) {
-        perror("socket");
-        freeaddrinfo(res);
-        return 1;
-    }
-
-    if (connect(new_socket, res->ai_addr, res->ai_addrlen) < 0) {// connect to the server
-        perror("connect");
-        freeaddrinfo(res);
-        return 1;
-    }
-
-    freeaddrinfo(res); // free the memory
-    cout << "Connected to server at " << host_name << " on port " << port << endl;
+    int sockfd=-1;
 
     if (uds_path) {
-        int client_socket = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (client_socket < 0) {
+        // Connect via UNIX Domain Socket
+        sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (sockfd < 0) {
             perror("socket");
             return 1;
         }
 
-        struct sockaddr_un server_addr;
-        memset(&server_addr, 0, sizeof(server_addr));
-        server_addr.sun_family = AF_UNIX;
-        strncpy(server_addr.sun_path, uds_path, sizeof(server_addr.sun_path) - 1);
+        struct sockaddr_un server_addr{};// struct for UNIX domain socket address
+        server_addr.sun_family = AF_UNIX;// UNIX domain socket family
+        strncpy(server_addr.sun_path, uds_path, sizeof(server_addr.sun_path) - 1);// copy the path to the structure
 
-        if (connect(client_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+        if (connect(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
             perror("connect");
+            close(sockfd);
+            return 1;
+        }
+        cout << "Connected to UDS server at " << uds_path << endl;
+    } 
+
+    else {// If host name and port are provided, use TCP sockets
+        struct addrinfo hints{}, *res;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;// TCP socket type
+
+        int status = getaddrinfo(host_name, port, &hints, &res);
+        if (status != 0) {// if getaddrinfo fails print error and exit
+            cerr << "getaddrinfo failed: " << gai_strerror(status) << endl;
             return 1;
         }
 
-        cout << "Connected to UDS server at " << uds_path << endl;
-        new_socket = client_socket;
+        sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);// create the socket
+        if (sockfd < 0) {
+            perror("socket");
+            freeaddrinfo(res);// free the addrinfo structure
+            return 1;
+        }
+
+        if (connect(sockfd, res->ai_addr, res->ai_addrlen) < 0) {// connect to the server
+            perror("connect");
+            freeaddrinfo(res);// free the addrinfo structure
+            close(sockfd);// close the socket 
+            return 1;
+        }
+
+        cout << "Connected to server at " << host_name << " on port " << port << endl;
+        freeaddrinfo(res);
     }
 
 
@@ -120,11 +114,11 @@ int main(int argc, char *argv[]) {
             break; // exit the loop if the user types 'exit'
         }
 
-        send(new_socket, command.c_str(), command.size(), 0); // send the command to the server
+        send(sockfd, command.c_str(), command.size(), 0); // send the command to the server
         memset(buffer, 0, BUFFER_SIZE); // clear buffer before reading
 
-        int valread = read(new_socket, buffer, BUFFER_SIZE); // read response from the server
-        if (valread < 0) {
+        int valread = read(sockfd, buffer, BUFFER_SIZE); // read response from the server
+        if (valread <= 0) {
             perror("Read error");
             break;
         }
@@ -132,7 +126,7 @@ int main(int argc, char *argv[]) {
         cout << "Server response: " << buffer << "\n"; // print the server response
     }
 
-    close(new_socket); // close the socket
+    close(sockfd); // close the socket
     cout << "Connection closed.\n";
     return 0; // exit the program
  
