@@ -477,7 +477,7 @@ int main(int argc, char *argv[]) {
                             send(new_socket, response.c_str(), response.length(), 0);
                         }                            
                         else {// if the quantity is over the maximum capacity
-                            response = "Error: get over of maximum capacity.\n";
+                            response = "Error: get over of maximum capacity\n";
                             send(new_socket, response.c_str(), response.length(), 0);
                         }
                         cout<< "Current bank status:\n";//for get info of the bank

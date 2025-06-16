@@ -14,7 +14,7 @@ drinks_bar: drinks_bar.cpp
 molecule_requester: molecule_requester.cpp
 	$(CXX) $(CXXFLAGS) -o molecule_requester molecule_requester.cpp
 
-# run the atom_supplier and molecule_requester programs
+# run the atom_supplier, molecule_requester and drinks_bar programs
 run_drinks_bar: drinks_bar
 	./drinks_bar -T 4444 -U 5555 -o 100 -h 100 -c 100   --stream-path /tmp/sock_stream --datagram-path /tmp/sock_dgram
 
