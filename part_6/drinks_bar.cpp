@@ -16,6 +16,7 @@
 #include <fstream> // for file operations
 #include <fcntl.h> // for file control operations
 #include <sys/file.h> // for file locking
+#include <atomic>
 
 // Constants
 #define BACKLOG 5//how many pending connections the queue will hold
@@ -25,6 +26,8 @@
 const char* save_file = nullptr; // to hold the save file path- NEW
 
 using namespace std;
+
+atomic<bool> running(true); // global variable to control the server loop, atomic for thread safety
 
 /*
     * Function to get a molecule from the bank.
@@ -425,7 +428,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    std::cout << "atom_Warehouse server is listening on port " << tcp_port << "...\n";
+    cout << "TCP server is listening on port " << tcp_port << "...\n";
 
     // create UDP socket
     if ((udp_socket = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
@@ -495,13 +498,12 @@ int main(int argc, char *argv[]) {
             perror("UDS datagram bind failed");
             return 1;
         }
-
         cout << "UDS datagram server is listening on " << uds_dgram_path << "\n";
     }
-
+    cout << "type \"exit\" to close the server\n";
 
     // main loop to accept and handle client connections
-    while (true) {
+    while (running) {
 
         FD_ZERO(&read_fds); // reset the set 
         FD_SET(server_fd, &read_fds); // add the server socket 
@@ -591,6 +593,11 @@ int main(int argc, char *argv[]) {
                 else if (command == "GEN CHAMPAGNE") {// check if the command is GEN CHAMPAGNE
                     int amount = get_amount("CHAMPAGNE", bank);
                     cout << "You can generate " << amount << " CHAMPAGNE(s)." << endl;
+                }
+                else if(command=="exit") {//NEW
+                    cout << "Exiting server...\n";
+                    running = false;
+                    break;
                 }
                 else {
                     cout << "Unknown command: " << command << endl;

@@ -1,0 +1,734 @@
+        -:    0:Source:drinks_bar.cpp
+        -:    0:Graph:drinks_bar.gcno
+        -:    0:Data:drinks_bar.gcda
+        -:    0:Runs:32
+        -:    1:#include <iostream>
+        -:    2:#include <unistd.h>
+        -:    3:#include <cstring>
+        -:    4:#include <cstdlib>
+        -:    5:#include <netinet/in.h>
+        -:    6:#include <sys/socket.h>
+        -:    7:#include <sys/types.h>
+        -:    8:#include <sys/select.h>
+        -:    9:#include <arpa/inet.h>
+        -:   10:#include <map>
+        -:   11:#include <vector>
+        -:   12:#include <sstream>
+        -:   13:#include <signal.h>
+        -:   14:#include <getopt.h>
+        -:   15:#include <sys/un.h> // for UNIX domain sockets
+        -:   16:#include <fstream> // for file operations
+        -:   17:#include <fcntl.h> // for file control operations
+        -:   18:#include <sys/file.h> // for file locking
+        -:   19:#include <atomic>
+        -:   20:
+        -:   21:// Constants
+        -:   22:#define BACKLOG 5//how many pending connections the queue will hold
+        -:   23:#define BUFFER_SIZE 1024// size of the buffer for reading and writing
+        -:   24:#define MAX_CLIENTS 25
+        -:   25:#define MAX_CAPACITY 1000000000000000000ULL
+        -:   26:const char* save_file = nullptr; // to hold the save file path- NEW
+        -:   27:
+        -:   28:using namespace std;
+        -:   29:
+        -:   30:atomic<bool> running(true); // global variable to control the server loop, atomic for thread safety
+        -:   31:
+        -:   32:/*
+        -:   33:    * Function to get a molecule from the bank.
+        -:   34:    * It checks if the required atoms are available in sufficient quantity.
+        -:   35:    * If available, it deducts the required atoms from the bank and returns true.
+        -:   36:    * If not available, it returns false.
+        -:   37:    * @param input_name: The name of the molecule to be created. 
+        -:   38:    * @param quantity: The quantity of the molecule to be created.
+        -:   39:    * @param bank: A map representing the available atoms in the bank.
+        -:   40:    * @return: true if the molecule can be created, false otherwise.
+        -:   41:*/
+       20:   42:bool get_molecule(const string& input_name, unsigned long long quantity, map<string, unsigned long long>& bank) {
+        -:   43:    map<string, map<string, int>> molecules = {
+    #####:   44:        {"H2O", {{"HYDROGEN", 2}, {"OXYGEN", 1}}},
+    #####:   45:        {"CO2", {{"CARBON", 1}, {"OXYGEN", 2}}},
+    #####:   46:        {"C6H12O6", {{"CARBON", 6}, {"HYDROGEN", 12}, {"OXYGEN", 6}}},
+    #####:   47:        {"C2H6O", {{"CARBON", 2}, {"HYDROGEN", 6}, {"OXYGEN", 1}}}
+      320:   48:    };
+        -:   49:
+        -:   50:    map<string, string> aliases = {//mapping common names to their chimical formoula
+        -:   51:        {"WATER", "H2O"},
+        -:   52:        {"GLUCOSE", "C6H12O6"},
+        -:   53:        {"ETHANOL", "C2H6O"},
+        -:   54:        {"CARBON DIOXIDE", "CO2"}
+      120:   55:    };
+        -:   56:
+       20:   57:    string molecule = input_name;
+       20:   58:    if (aliases.find(input_name) != aliases.end()) {// check if the input name is an alias
+    #####:   59:        molecule = aliases[input_name];
+        -:   60:    }
+        -:   61:
+       20:   62:    if (molecules.find(molecule) == molecules.end()) {//if no found return false
+    #####:   63:        cerr << "Unknown molecule: " << molecule << endl;
+    #####:   64:        return false;
+        -:   65:    }
+        -:   66:
+       20:   67:    const auto& required_atoms = molecules[molecule];
+        -:   68:
+       56:   69:    for (const auto& pair : required_atoms) {// check if the required atoms are available in sufficient quantity
+       42:   70:        const string& atom = pair.first;
+       42:   71:        unsigned long long amount = pair.second;// get the amount of the atom required for the molecule
+       42:   72:        unsigned long long needed = static_cast<unsigned long long>(amount) * quantity;//using static_cast to convert the int to unsigned long long
+       42:   73:        if (bank[atom] < needed) {
+        6:   74:            return false;
+        -:   75:        }
+        -:   76:    }
+        -:   77:
+       48:   78:    for (const auto& pair : required_atoms) {// deduct the required atoms from the bank
+       34:   79:        const string& atom = pair.first;
+       34:   80:        unsigned long long amount = pair.second;
+       34:   81:        bank[atom] -= static_cast<unsigned long long>(amount) * quantity;// using static_cast to convert the int to unsigned long long
+        -:   82:    }
+        -:   83:
+       14:   84:    return true;
+      300:   85:}
+        -:   86:
+        -:   87:/**
+        -:   88: * Function to calculate the amount of a drink that can be created based on the available atoms in the bank.
+        -:   89: * @param s: The name of the drink (e.g., "SOFT DRINK", "VODKA", "CHAMPAGNE").
+        -:   90: * @param bank: A map representing the available atoms in the bank.
+        -:   91: * @return: The maximum amount of the drink that can be created.
+        -:   92: * Returns 0 if the drink is unknown or if there are not enough atoms to create it.
+        -:   93: */
+        -:   94:
+        5:   95:unsigned long long get_amount(const  string& s, const map<string, unsigned long long>& bank) {
+        5:   96:    unsigned long long amount = 0;
+        5:   97:    int C=0, O=0, H=0;//to hold the amount of each atom
+        -:   98:
+        5:   99:    if(s=="SOFT DRINK"){C=7;O=9;H=14;}//the amount of each atom in the drink
+        4:  100:    else if(s=="VODKA"){C=2;O=2;H=8;}
+        1:  101:    else if(s=="CHAMPAGNE"){C=3;O=4;H=8;}
+        -:  102:    else{
+    #####:  103:        cerr << "Unknown drink: " << s << endl;
+    #####:  104:        return 0;//if no found return 0
+        -:  105:    }
+       25:  106:    amount = min(min(bank.at("CARBON")/C, bank.at("OXYGEN")/O), bank.at("HYDROGEN")/H);//get the amount of the molecule that we can create
+        5:  107:    return amount;
+        -:  108:}
+        -:  109:
+        -:  110:/* * Signal handler for timeout.
+        -:  111: * This function is called when the timeout is reached.
+        -:  112: * It prints a message and exits the program.
+        -:  113: * @param: The signal number (not used in this case).
+        -:  114:*/
+        3:  115:void timeout_handler(int) {
+        3:  116:    cerr << "Server timed out. Exiting...\n";
+        3:  117:    exit(1);// exit the program if the timeout is reached
+        -:  118:}
+        -:  119:
+        -:  120:
+        -:  121:/**
+        -:  122: * Function to load or create an inventory from a text file.
+        -:  123: * If the file does not exist or is empty, it initializes the inventory with the given values.
+        -:  124: * @param path: The path to the text file.
+        -:  125: * @param bank: A map representing the initial inventory.
+        -:  126: * @return: bool indicating success or failure. 
+        -:  127: */
+       60:  128:bool read_save_file(const string& path, map<string, unsigned long long>& bank) {
+       60:  129:    ifstream infile(path);// open the file for reading
+      60*:  130:    if (!infile) return false; // if the file cannot be opened, return false
+        -:  131:
+       60:  132:    string line;
+        -:  133:    unsigned long long num;
+      240:  134:    while (infile >> line >> num) { // read each line from the file
+      180:  135:        bank[line] = num; // update the bank with the values from the file
+        -:  136:    }
+       60:  137:    return true;
+       60:  138:}
+        -:  139:
+        -:  140:
+        -:  141:/*
+        -:  142: * Function to write the current state of the bank to a file.
+        -:  143: * It overwrites the existing file or creates a new one if it does not exist.
+        -:  144: * @param path: The path to the file where the bank will be saved.
+        -:  145: * @param bank: A map representing the current state of the bank.
+        -:  146: * @return: bool indicating success or failure.
+        -:  147: */
+       38:  148:bool write_save_file(const string& path, const map<string, unsigned long long>& bank) {
+        -:  149:
+       38:  150:    int fd = open(path.c_str(), O_WRONLY | O_TRUNC);
+       38:  151:    if(fd==-1) {
+    #####:  152:        cerr << "Error opening file for writing: " << path << endl;
+    #####:  153:        return false; // if the file cannot be opened, return false
+        -:  154:    }
+       38:  155:    flock(fd, LOCK_EX); // lock the file for writing
+       38:  156:    FILE* file = fdopen(fd, "w");//file object to write to the file
+       38:  157:    if (!file) {
+    #####:  158:        cerr << "Error opening file stream: " << path << endl;
+    #####:  159:        close(fd);
+    #####:  160:        return false; // if the file stream cannot be opened, return false
+        -:  161:    }
+      152:  162:    for(const auto& pair : bank) { // write each atom and its quantity to the file
+      114:  163:        fprintf(file, "%s %llu\n", pair.first.c_str(), pair.second);
+        -:  164:    }
+       38:  165:    fflush(file); // go over the file stream to ensure all data is written
+       38:  166:    flock(fd, LOCK_UN); // unlock the file
+       38:  167:    fclose(file); // close the file stream and the file descriptor
+       38:  168:    return true; // return true if the file was written successfully
+        -:  169:}
+        -:  170:
+        -:  171:/**
+        -:  172: * Function to parse the command and execute it.
+        -:  173: * It checks if the command is valid and if the required atoms are available in the bank.
+        -:  174: * If valid, it returns a success message, otherwise an error message.
+        -:  175: * @param com: The command string to be parsed.
+        -:  176: * @param bank: A map representing the available atoms in the bank.
+        -:  177: * @return: A string containing the result of the command execution.
+        -:  178: */
+       27:  179:string parse_command(const string& com, map<string,unsigned long long>& bank){
+       27:  180:    istringstream iss(com);
+       27:  181:    string command;
+       27:  182:    iss >> command;// get the command from the input string
+        -:  183:
+       27:  184:    if (command != "DELIVER") {
+        2:  185:        return "Error: invalid command - Usage: DELIVER <molecule_name> <quantity>\n";
+        -:  186:    }
+        -:  187:    // Check if the save file is provided and read it if it exists
+       26:  188:    if (save_file) {
+       50:  189:        read_save_file(save_file, bank);
+        -:  190:    }
+        -:  191:
+       26:  192:    string rest;// get the rest of the command after DELIVER
+       26:  193:    getline(iss, rest);// create a string stream to parse the rest of the command
+       26:  194:    istringstream rest_iss(rest);// create a string stream to parse the rest of the command
+       26:  195:    vector<string> tokens;// to hold the tokens of the command
+       26:  196:    string token;
+        -:  197:
+       80:  198:    while (rest_iss >> token) {// split the rest of the command into tokens
+       54:  199:        tokens.push_back(token);
+        -:  200:    }
+        -:  201:
+       26:  202:    if (tokens.size() < 2) {
+        2:  203:        return "Error: invalid molecule name or quantity - Usage: DELIVER <molecule_name> <quantity>\n";
+        -:  204:    }
+        -:  205:
+       25:  206:    string quantity_str = tokens.back();//insert the last token as the quantity
+       25:  207:    tokens.pop_back();// remove the last token from the tokens vector
+        -:  208:
+        -:  209:    unsigned long long quantity;
+        -:  210:    try {
+       25:  211:        quantity = stoull(quantity_str);// stoull is used to convert the string to unsigned long long
+    =====:  212:    } catch (...) {
+    =====:  213:        return "Error: invalid quantity.\n";
+    =====:  214:    }
+        -:  215:
+       25:  216:    string item;
+       53:  217:    for (size_t i = 0; i < tokens.size(); ++i) {// get the molecule name from the tokens
+       28:  218:        if (i > 0) item += " ";
+       28:  219:        item += tokens[i];
+        -:  220:    }
+        -:  221:
+       25:  222:    string molecule;
+        -:  223:    // map the molecule name to its chemical formula
+       25:  224:    if (item == "WATER") molecule = "H2O";
+       17:  225:    else if (item == "CARBON DIOXIDE") molecule = "CO2";
+       14:  226:    else if (item == "ALCOHOL") molecule = "C2H6O";
+       10:  227:    else if (item == "GLUCOSE") molecule = "C6H12O6";
+        -:  228:    else {
+       10:  229:        return "Error: invalid molecule name. Valid names are: WATER, CARBON DIOXIDE, ALCOHOL, GLUCOSE.\n";
+        -:  230:    }
+        -:  231:
+       20:  232:    bool success = get_molecule(molecule, quantity, bank);// check if the molecule can be created with the available atoms in the bank
+        -:  233:    
+       20:  234:    if (success) {//print the success message if the molecule can be created
+       14:  235:        cout << "Delivered " << quantity << " " << item << ", Current bank status:\n";
+       56:  236:        for (const auto& pair : bank) {// print the current status of the bank
+       42:  237:            cout <<" "<< pair.first << ": " << pair.second << endl;
+        -:  238:        }
+       14:  239:        if(save_file){//check if the save file is provided
+       28:  240:            write_save_file(save_file, bank);
+        -:  241:        }
+        -:  242:        
+       14:  243:        return "Delivered " + to_string(quantity) + " " + item + "\n";
+        -:  244:    } else {
+       12:  245:        return "Error: not enough atoms to deliver\n";
+        -:  246:    }
+       27:  247:}
+        -:  248:
+        -:  249:
+       32:  250:int main(int argc, char *argv[]) {
+        -:  251:    //first define the ports by -1 as long as they are not given by the user
+       32:  252:    int tcp_port=-1;
+       32:  253:    int udp_port=-1;
+        -:  254:
+       32:  255:    long long oxygen=0, hydrogen=0, carbon=0;//to hold the amount of each atom
+       32:  256:    int time_out=-1;//to hold the timeout value
+        -:  257:    int input;
+        -:  258:
+        -:  259:    //struct option is used to define the long options for getopt_long
+       32:  260:    struct option long_options[] = {
+        -:  261:        {"tcp-port", required_argument, nullptr, 'T'},
+        -:  262:        {"udp-port", required_argument, nullptr, 'U'},
+        -:  263:        {"timeout", required_argument, nullptr, 't'},
+        -:  264:        {"oxygen", required_argument, nullptr, 'o'},
+        -:  265:        {"hydrogen", required_argument, nullptr, 'h'},
+        -:  266:        {"carbon", required_argument, nullptr, 'c'},
+        -:  267:        
+        -:  268:        {"stream-path", required_argument, nullptr, 's'},
+        -:  269:        {"datagram-path", required_argument, nullptr, 'd'},
+        -:  270:        // NEW: save file option
+        -:  271:        {"save-file", required_argument, nullptr, 'f'},
+        -:  272:
+        -:  273:        {nullptr, 0, nullptr, 0} // end of options
+        -:  274:    };
+        -:  275:
+        -:  276:    // Define variables for UDS paths
+       32:  277:    string uds_stream_path, uds_dgram_path;
+        -:  278:    // Flags to check if UDS paths are provided
+       32:  279:    bool has_tcp = false, has_udp = false, has_uds_stream = false, has_uds_dgram = false;
+        -:  280:    
+        -:  281:
+        -:  282:    // Parse command line arguments
+      167:  283:    while((input=getopt_long(argc, argv, "T:U:t:o:h:c:s:d:f:",long_options, nullptr))!=-1) {
+        -:  284:
+      143:  285:        switch(input) {
+       29:  286:            case 'T': // TCP port
+       29:  287:                tcp_port = atoi(optarg);
+       29:  288:                if(tcp_port <= 0 || tcp_port > 65535) {
+        1:  289:                    cerr << "Invalid TCP port number It should be between 1 and 65535\n";
+        1:  290:                    return 1;
+        -:  291:                }
+       28:  292:                break;
+       28:  293:            case 'U': // UDP port
+       28:  294:                udp_port = atoi(optarg);//using atoi to convert the string to int
+       28:  295:                if(udp_port <= 0 || udp_port > 65535) {
+        1:  296:                    cerr << "Invalid UDP port number It should be between 1 and 65535\n";
+        1:  297:                    return 1;
+        -:  298:                }
+       27:  299:                break;
+        4:  300:            case 't': // timeout value
+        4:  301:                time_out = atoi(optarg);
+        4:  302:                if(time_out < 0) {// check if the timeout value is valid
+        1:  303:                    cerr << "Invalid timeout value, it should be a non-negative integer\n";
+        1:  304:                    return 1;
+        -:  305:                }
+        3:  306:                break;
+       14:  307:            case 'o': // oxygen amount
+       14:  308:                oxygen= atoi(optarg);
+       14:  309:                if(oxygen < 0 ) {
+        1:  310:                    cerr << "Invalid oxygen amount, it should be a non-negative integer\n";
+        1:  311:                    return 1;
+        -:  312:                }
+       13:  313:                break;
+       12:  314:            case 'c': // carbon amount
+       12:  315:                carbon = atoi(optarg);
+       12:  316:                if(carbon < 0) {
+        1:  317:                    cerr << "Invalid carbon amount It should be a non-negative integer\n";
+        1:  318:                    return 1;
+        -:  319:                }
+       11:  320:                break;
+       13:  321:            case 'h': // hydrogen amount
+       13:  322:                hydrogen = atoi(optarg); // using atoi to convert the string to int
+       13:  323:                if(hydrogen < 0) { // check if the conversion was successful and if the value is non-negative
+        1:  324:                    cerr << "Invalid hydrogen amount, it should be a non-negative integer\n";
+        1:  325:                    return 1;
+        -:  326:                }
+       12:  327:                break;
+       13:  328:            case 's':// UDS stream path
+       13:  329:                uds_stream_path = optarg;
+       13:  330:                has_uds_stream = true;
+       13:  331:                break;
+       13:  332:            case 'd':// UDS datagram path
+       13:  333:                uds_dgram_path = optarg;
+       13:  334:                has_uds_dgram = true;
+       13:  335:                break;
+        -:  336:
+       15:  337:            case 'f': // save file path
+       15:  338:                save_file= optarg;
+       15:  339:                break;
+        -:  340:
+        2:  341:            case '?': // unknown option
+        2:  342:                cout << "Usage: " <<"program_name"<< " -T <TCP port> -U <UDP port> -t <timeout(sec)>(optional) -o <oxygen amount>(optional) -h <hydrogen amount>(optional) -c <carbon amount>(optional)\n";
+        2:  343:                return 1;
+    #####:  344:            default:
+    #####:  345:                cout << "Usage: " <<"program_name"<< " -T <TCP port> -U <UDP port> -t <timeout(sec)>(optional) -o <oxygen amount>(optional) -h <hydrogen amount>(optional) -c <carbon amount>(optional)\n";
+    #####:  346:                return 1;
+        -:  347:        }
+        -:  348:    }
+        -:  349:
+        -:  350:    
+       24:  351:    if(tcp_port == -1 || udp_port == -1) {//check if the TCP and UDP ports are given
+        1:  352:        cerr << "Error: TCP and UDP ports are required. closing the server...\n";
+        1:  353:        return 1;
+        -:  354:    }
+        -:  355:
+        -:  356:    // Check if TCP and UDP ports are different
+       23:  357:    if (tcp_port == udp_port) {
+    #####:  358:        cerr << "Error: TCP and UDP ports must be different." << endl;
+    #####:  359:        return 1;
+        -:  360:    }
+       23:  361:    if(time_out!=-1){
+        3:  362:        signal(SIGALRM, timeout_handler); // set the signal handler for the timeout
+        3:  363:        alarm(time_out); // set the timeout for the server
+        -:  364:    }
+        -:  365:
+        -:  366:    // Check if UDS paths are provided and validate them- NEW
+      23*:  367:    if ((has_tcp && has_uds_stream) || (has_udp && has_uds_dgram)) {
+    #####:  368:    cerr << "Error: Cannot use both TCP and UDS stream (or UDP and UDS datagram).\n";
+    #####:  369:    return 1;
+        -:  370:    }
+        -:  371:
+        -:  372:
+      134:  373:    map<string,unsigned long long> bank={{"CARBON", 0}, {"OXYGEN", 0}, {"HYDROGEN", 0}}; //atoms bank structure
+        -:  374:
+       23:  375:    if (save_file && access(save_file, F_OK) == 0) {// Check if the save file exists
+       10:  376:        cout << "Updating inventory from file: " << save_file << endl;//update information from the file
+       20:  377:        if (!read_save_file(save_file, bank)) {// if the file cannot be read, return an error
+    #####:  378:            cerr << "Error loading bank file\n";
+    #####:  379:            return 1;
+        -:  380:        }
+        -:  381:    } else {
+        -:  382:        // Initialize according to the options from step 4
+       26:  383:        bank["OXYGEN"] = oxygen;
+       26:  384:        bank["HYDROGEN"] = hydrogen;
+       26:  385:        bank["CARBON"] = carbon;
+        -:  386:
+        -:  387:        // create the save file if it doesn't exist
+       13:  388:        if (save_file) {// check if the save file is provided
+        4:  389:            ofstream(save_file).close(); // create an empty file if it doesn't exist
+        8:  390:            write_save_file(save_file, bank);// write the initial state of the bank to the file
+        -:  391:        }
+        -:  392:    }
+        -:  393:
+        -:  394:
+       23:  395:    int num_clients = 0; // to count the number of clients
+        -:  396:
+      157:  397:    vector<string> mol_bank = {{"WATER"}, {"CARBON DIOXIDE"}, {"ALCOHOL"}, {"GLUCOSE"}};
+        -:  398:
+        -:  399:   
+        -:  400:    int udp_socket;// int for UDP socket
+        -:  401:    struct sockaddr_in udp_addr;
+        -:  402:
+       23:  403:    int server_fd, new_socket, client_socket[MAX_CLIENTS]={0};// int of file descriptor array to hold client sockets
+        -:  404:    struct sockaddr_in address;// struct to hold the address of the server
+       23:  405:    socklen_t addrlen = sizeof(address);// length of the address structure
+        -:  406:    fd_set read_fds; // set of sockets for reading
+       23:  407:    char buffer[BUFFER_SIZE] = {0}; // buffer for reading and writing
+        -:  408:
+        -:  409:    // create TCP socket
+       23:  410:    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
+    #####:  411:        perror("socket creation failed");
+    #####:  412:        return 1;
+        -:  413:    }
+        -:  414:   
+       23:  415:    address.sin_family = AF_INET;// IPv4
+       23:  416:    address.sin_addr.s_addr = INADDR_ANY; // local address
+       23:  417:    address.sin_port = htons(tcp_port); // convert port to network byte order
+        -:  418:
+        -:  419:    // bind the socket to the address and port
+       23:  420:    if(bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
+        1:  421:        perror("bind failed");
+        1:  422:        return 1;
+        -:  423:    }
+        -:  424:
+        -:  425:    // listen for incoming connections
+       22:  426:    if (listen(server_fd, BACKLOG) < 0) {
+    #####:  427:        perror("listen");
+    #####:  428:        return 1;
+        -:  429:    }
+        -:  430:
+       22:  431:    cout << "TCP server is listening on port " << tcp_port << "...\n";
+        -:  432:
+        -:  433:    // create UDP socket
+       22:  434:    if ((udp_socket = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+    #####:  435:        perror("UDP socket creation failed");
+    #####:  436:        exit(EXIT_FAILURE);
+        -:  437:    }
+        -:  438:
+        -:  439:    // set up the address structure
+       22:  440:    udp_addr.sin_family = AF_INET;
+       22:  441:    udp_addr.sin_addr.s_addr = INADDR_ANY;
+       22:  442:    udp_addr.sin_port = htons(udp_port); // port received from user
+        -:  443:
+        -:  444:
+        -:  445:    // bind the UDP socket to the address and port
+       22:  446:    if(bind(udp_socket, (struct sockaddr*)&udp_addr, sizeof(udp_addr)) < 0) {
+        1:  447:        perror("UDP bind failed");
+        1:  448:        close(udp_socket);
+        1:  449:        exit(EXIT_FAILURE);
+        -:  450:    }
+        -:  451:
+       21:  452:    cout << "UDP server is listening on port " << udp_port << "...\n";
+        -:  453:
+        -:  454:    // Create UNIX domain sockets if paths are provided
+       21:  455:    int uds_fd = -1;
+        -:  456:    struct sockaddr_un uds_stream_addr;
+       21:  457:    if (has_uds_stream) {
+       12:  458:        uds_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+       12:  459:        if (uds_fd < 0) {
+    #####:  460:            perror("UDS stream socket creation failed");
+    #####:  461:            return 1;
+        -:  462:        }
+        -:  463:
+       12:  464:        memset(&uds_stream_addr, 0, sizeof(uds_stream_addr));// clear the structure
+       12:  465:        uds_stream_addr.sun_family = AF_UNIX;// UNIX domain socket family
+       12:  466:        strncpy(uds_stream_addr.sun_path, uds_stream_path.c_str(), sizeof(uds_stream_addr.sun_path) - 1);// copy the path to the structure
+        -:  467:
+       12:  468:        unlink(uds_stream_path.c_str()); // Remove old file
+       12:  469:        if (bind(uds_fd, (struct sockaddr*)&uds_stream_addr, sizeof(uds_stream_addr)) < 0) {// bind the socket to the address and path
+    #####:  470:            perror("UDS stream bind failed");
+    #####:  471:            return 1;
+        -:  472:        }
+        -:  473:
+       12:  474:        if (listen(uds_fd, BACKLOG) < 0) {// listen for incoming connections on the UDS stream socket
+    #####:  475:            perror("UDS stream listen failed");
+    #####:  476:            return 1;
+        -:  477:        }
+        -:  478:
+       12:  479:        cout << "UDS stream server is listening on " << uds_stream_path << "\n";
+        -:  480:    }
+        -:  481:
+        -:  482:    // Create UDS datagram socket if path is provided
+       21:  483:    int uds_dgram_fd = -1;// int for UDS datagram socket
+        -:  484:    struct sockaddr_un uds_dgram_addr;
+       21:  485:    if (has_uds_dgram) {// check if the UDS datagram path is provided
+       12:  486:        uds_dgram_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+       12:  487:        if (uds_dgram_fd < 0) {// create the UDS datagram socket
+    #####:  488:            perror("UDS datagram socket creation failed");
+    #####:  489:            return 1;
+        -:  490:        }
+        -:  491:
+       12:  492:        memset(&uds_dgram_addr, 0, sizeof(uds_dgram_addr));// clear the structure
+       12:  493:        uds_dgram_addr.sun_family = AF_UNIX;
+       12:  494:        strncpy(uds_dgram_addr.sun_path, uds_dgram_path.c_str(), sizeof(uds_dgram_addr.sun_path) - 1);
+        -:  495:
+       12:  496:        unlink(uds_dgram_path.c_str());// Remove old file
+       12:  497:        if (bind(uds_dgram_fd, (struct sockaddr*)&uds_dgram_addr, sizeof(uds_dgram_addr)) < 0) {// bind the socket to the address and path
+    #####:  498:            perror("UDS datagram bind failed");
+    #####:  499:            return 1;
+        -:  500:        }
+       12:  501:        cout << "UDS datagram server is listening on " << uds_dgram_path << "\n";
+        -:  502:    }
+       21:  503:    cout << "type \"exit\" to close the server\n";
+        -:  504:
+        -:  505:    // main loop to accept and handle client connections
+      110:  506:    while (running) {
+        -:  507:
+     1870:  508:        FD_ZERO(&read_fds); // reset the set 
+      110:  509:        FD_SET(server_fd, &read_fds); // add the server socket 
+        -:  510:
+      110:  511:        FD_SET(udp_socket, &read_fds); // add the UDP socket
+      110:  512:        int max_sd = server_fd; // the maximum socket
+        -:  513:
+      110:  514:        FD_SET(STDIN_FILENO, &read_fds);
+     110*:  515:        if (STDIN_FILENO > max_sd) max_sd = STDIN_FILENO;
+        -:  516:
+        -:  517:
+      178:  518:        for (int i = 0; i < num_clients; i++) {// loop through the client sockets and add them to the set
+       68:  519:            int sd = client_socket[i];
+       68:  520:            if (sd > 0) FD_SET(sd, &read_fds);
+       68:  521:            if (sd > max_sd){ max_sd = sd;} // update max
+        -:  522:        }
+        -:  523:
+      110:  524:        if (udp_socket > max_sd) {max_sd = udp_socket;} // update max if UDP socket is larger
+        -:  525:
+        -:  526:        //before the select- checking if provided and add UDS sockets to the set if they exist
+      110:  527:        if (has_uds_stream) {
+       90:  528:            FD_SET(uds_fd, &read_fds); // add the UDS stream socket
+       90:  529:            if (uds_fd > max_sd) max_sd = uds_fd; // update max if UDS stream socket is larger
+        -:  530:        }
+      110:  531:        if (has_uds_dgram) {
+       90:  532:            FD_SET(uds_dgram_fd, &read_fds); // add the UDS datagram socket
+       90:  533:            if (uds_dgram_fd > max_sd) max_sd = uds_dgram_fd; // update max if UDS datagram socket is larger
+        -:  534:        }
+        -:  535:        
+      110:  536:        int activity =select(max_sd + 1, &read_fds, nullptr, nullptr, nullptr);// wait for activity on the sockets
+        -:  537:
+        -:  538:        // Check if there was activity on the UDS stream socket
+      107:  539:        if (has_uds_stream && FD_ISSET(uds_fd, &read_fds)) {
+        2:  540:            int new_socket = accept(uds_fd, nullptr, nullptr);// accept a new connection on the UDS stream socket
+        2:  541:            if (new_socket >= 0) {// check if the accept was successful
+        2:  542:                cout << "New UDS stream client connected: " << new_socket << "\n";
+        2:  543:                if(num_clients < MAX_CLIENTS) {
+        2:  544:                    client_socket[num_clients++] = new_socket;// add the new socket to the client sockets array
+        -:  545:                } else {
+    #####:  546:                    cerr << "Max clients reached. Rejecting.\n";
+    #####:  547:                    close(new_socket);// close the socket if max clients reached
+        -:  548:                }
+        -:  549:            }
+        -:  550:        }
+        -:  551:        
+        -:  552:        // Check if there was activity on the UDS datagram socket
+      107:  553:        if (has_uds_dgram && FD_ISSET(uds_dgram_fd, &read_fds)) {
+        -:  554:            char uds_buffer[BUFFER_SIZE];// buffer for UDS datagram
+        -:  555:            struct sockaddr_un client_addr;// struct to hold the client address
+       16:  556:            socklen_t client_len = sizeof(client_addr);// length of the client address structure
+        -:  557:
+       16:  558:            int bytes = recvfrom(uds_dgram_fd, uds_buffer, BUFFER_SIZE, 0, (struct sockaddr*)&client_addr, &client_len);// receive data from the UDS datagram socket
+       16:  559:            if (bytes > 0) {
+       16:  560:                uds_buffer[bytes] = '\0';
+        -:  561:                // send response back
+       16:  562:                string response = parse_command(uds_buffer, bank);// parse the command and get the response
+       16:  563:                sendto(uds_dgram_fd, response.c_str(), response.length(), 0, (struct sockaddr*)&client_addr, client_len);// send response to the client
+       16:  564:            }
+        -:  565:        }
+        -:  566:
+        -:  567:
+     107*:  568:        if (activity < 0) {//mean that there no activity on the sockets
+    #####:  569:            perror("select error");
+    #####:  570:            continue;
+        -:  571:        }
+        -:  572:
+        -:  573:        // Reset alarm if there was activity (only if timeout is set)
+      107:  574:        if (time_out != -1 && activity > 0) {
+        1:  575:            alarm(time_out);
+        -:  576:        }
+        -:  577:
+      107:  578:        if (FD_ISSET(STDIN_FILENO, &read_fds)) {
+        -:  579:            char buffer[1024];
+       25:  580:            memset(buffer, 0, sizeof(buffer));// clear the buffer
+       25:  581:            if (fgets(buffer, sizeof(buffer), stdin)) {
+       25:  582:                string command(buffer);
+       25:  583:                command.erase(command.find_last_not_of(" \n\r\t")+1); // remove trailing whitespace and newline characters
+        -:  584:
+       25:  585:                if (command == "GEN SOFT DRINK") {// check if the command is GEN SOFT DRINK
+        1:  586:                    int amount = get_amount("SOFT DRINK", bank);
+        1:  587:                    cout << "You can generate " << amount << " SOFT DRINK(s)." << endl;
+        -:  588:                }
+       24:  589:                else if (command == "GEN VODKA") {// check if the command is GEN VODKA
+        3:  590:                    int amount = get_amount("VODKA", bank);
+        3:  591:                    cout << "You can generate " << amount << " VODKA(s)." << endl;
+        -:  592:                }
+       21:  593:                else if (command == "GEN CHAMPAGNE") {// check if the command is GEN CHAMPAGNE
+        1:  594:                    int amount = get_amount("CHAMPAGNE", bank);
+        1:  595:                    cout << "You can generate " << amount << " CHAMPAGNE(s)." << endl;
+        -:  596:                }
+       20:  597:                else if(command=="exit") {//NEW
+       18:  598:                    cout << "Exiting server...\n";
+       18:  599:                    running = false;
+       18:  600:                    break;
+        -:  601:                }
+        -:  602:                else {
+        2:  603:                    cout << "Unknown command: " << command << endl;
+        -:  604:                }
+       25:  605:            }
+        -:  606:        }
+        -:  607:
+        -:  608:
+        -:  609:        // check if there is activity on the server socket
+       82:  610:        else if(FD_ISSET(server_fd, &read_fds)) {
+       7*:  611:            if((new_socket = accept(server_fd, (struct sockaddr*)&address, &addrlen)) < 0) {
+    #####:  612:                perror("accept");
+    #####:  613:                continue;
+        -:  614:            }
+        7:  615:            cout << "New client connected to socket: " << new_socket << "\n";
+        -:  616:            
+        7:  617:            if(num_clients > MAX_CLIENTS) {
+    #####:  618:                std::cerr << "Maximum number of clients reached. Cannot accept new client.\n";
+    #####:  619:                close(new_socket); // close the socket if max clients reached
+    #####:  620:                break;;
+        -:  621:            }
+        7:  622:            client_socket[num_clients] = new_socket; // add the new socket to the client sockets array
+        7:  623:            num_clients++;// increment the number of clients
+        -:  624:            // If there is activity on the server socket, then there is a new client
+        -:  625:
+        7:  626:            cout << "Client added to the list of sockets.\n";
+        -:  627:        }
+        -:  628:
+        -:  629:        // check if there is activity on the UDP socket
+       75:  630:        else if(FD_ISSET(udp_socket, &read_fds)) {
+        -:  631:            char udp_buffer[BUFFER_SIZE];
+        -:  632:            struct sockaddr_in udp_client_addr;
+       11:  633:            socklen_t udp_addr_len = sizeof(udp_client_addr);
+        -:  634:
+       11:  635:            int udp_valread = recvfrom(udp_socket, udp_buffer, BUFFER_SIZE, 0, (struct sockaddr*)&udp_client_addr, &udp_addr_len);//using recvfrom to receive data from the UDP socket
+      11*:  636:            if (udp_valread < 0) {
+    #####:  637:                perror("recvfrom");
+    #####:  638:                continue;
+        -:  639:            }
+       11:  640:            udp_buffer[udp_valread] = '\0'; // null-terminate the buffer
+       11:  641:            cout << "Received UDP message: " << udp_buffer << "\n";
+        -:  642:
+       11:  643:            string response = parse_command(udp_buffer, bank);
+        -:  644:
+       11:  645:            sendto(udp_socket, response.c_str(), response.length(), 0,
+        -:  646:                (struct sockaddr*)&udp_client_addr, udp_addr_len);
+       11:  647:        }
+        -:  648:
+      164:  649:        for (int i=0;i<num_clients;i++) {
+       75:  650:            if (FD_ISSET(client_socket[i], &read_fds)) {
+        -:  651:                // If there is activity on the client socket
+       46:  652:                new_socket = client_socket[i];   
+        -:  653:                    
+       46:  654:                int valread = read(new_socket, buffer, BUFFER_SIZE);// read data from the client
+       46:  655:                if(valread <= 0) {
+        7:  656:                    cout<<"Client disconnected from socket: " << new_socket << "\n";
+        7:  657:                    close(new_socket);
+        7:  658:                    client_socket[i] = client_socket[num_clients - 1]; // remove the client from the list
+        7:  659:                    client_socket[num_clients - 1] = 0; // clear the last socket
+        7:  660:                    num_clients--; // decrement the client count
+        -:  661:                }
+        -:  662:                else{// if there is data from the client
+       39:  663:                    buffer[valread] = '\0'; 
+       39:  664:                    cout << "Received from client: " << buffer << std::endl;
+        -:  665:
+       39:  666:                    string a, type;
+        -:  667:                    long long temp_quantity;//to hold the quantity temporarily and handle negative values
+       78:  668:                    stringstream ss(buffer);
+       39:  669:                    ss >> a >> type >> temp_quantity; // divide to parts
+       39:  670:                    string response;
+        -:  671:
+        -:  672:                    // validate input
+       39:  673:                    if (ss.fail()||temp_quantity< 0) {// check if the input is valid
+       11:  674:                        response = "Error: invalid quantity.\n";
+       11:  675:                        send(new_socket, response.c_str(), response.length(), 0);
+       11:  676:                        cerr << "Invalid quantity received from client: " << buffer << endl;
+       11:  677:                        continue;
+        -:  678:                    }
+       28:  679:                    unsigned long long quantity = static_cast<unsigned long long>(temp_quantity);
+        -:  680:
+        -:  681:                    //if the save file is provided, read it first
+        -:  682:                    // this is to ensure that the bank is updated with the latest values from the save file
+       28:  683:                    if (save_file) {
+       50:  684:                        read_save_file(save_file, bank);
+        -:  685:                    }
+        -:  686:
+       28:  687:                    if(a=="ADD"&&bank.count(type)){// check if the command is ADD and the atom type is valid
+       25:  688:                        if(bank[type] + quantity <= MAX_CAPACITY) {// check if the quantity is within the maximum capacity
+       23:  689:                            bank[type] += quantity;//add the quantity to the bank
+       23:  690:                            if(save_file){// check if the save file is provided and update it
+       40:  691:                                write_save_file(save_file, bank);// write the bank to the save file
+        -:  692:                            }
+       23:  693:                            string response= "Added\n";
+       23:  694:                            send(new_socket, response.c_str(), response.length(), 0);
+        -:  695:
+       23:  696:                        }                            
+        -:  697:                        else {// if the quantity is over the maximum capacity
+        2:  698:                            response = "Error: get over of maximum capacity\n";
+        2:  699:                            send(new_socket, response.c_str(), response.length(), 0);
+        -:  700:                        }
+       25:  701:                        cout<< "Current bank status:\n";//for get info of the bank
+      100:  702:                        for (const auto& k : bank) {
+       75:  703:                            cout << k.first << ": " << k.second << endl;
+        -:  704:                        }
+        -:  705:                    } 
+        -:  706:                    else {// if the command is not like the format that we expect
+        3:  707:                        response = "Error: invalid command or atom type, Usage: ADD <atom_type_(capital)> <quantity>\n";
+        3:  708:                        send(new_socket, response.c_str(), response.length(), 0);//send response to client
+        3:  709:                        cerr << "Received invalid command from client: " << buffer << endl;
+        -:  710:                    }
+        -:  711:
+       72:  712:                }
+        -:  713:            }
+        -:  714:        } 
+        -:  715:    }
+        -:  716:
+        -:  717:    // Close all client sockets
+       18:  718:    close(server_fd);
+       18:  719:    close(udp_socket);
+        -:  720:
+        -:  721:    
+       18:  722:    if(has_uds_stream) {
+       12:  723:        unlink(uds_stream_path.c_str()); // remove the UDS stream socket file after closing the server
+        -:  724:    }
+       18:  725:    if(has_uds_dgram) {
+       12:  726:        unlink(uds_dgram_path.c_str()); // remove the UDS datagram socket file after closing the server
+        -:  727:    }
+        -:  728: 
+       18:  729:    return 0;
+      120:  730:}

@@ -1,0 +1,178 @@
+        -:    0:Source:molecule_requester.cpp
+        -:    0:Graph:molecule_requester.gcno
+        -:    0:Data:molecule_requester.gcda
+        -:    0:Runs:15
+        -:    0:Source is newer than graph
+        -:    1:
+        -:    2:#include <iostream>
+        -:    3:#include <cstring>
+        -:    4:#include <cstdlib>
+        -:    5:#include <unistd.h>
+        -:    6:#include <netdb.h>
+        -:    7:#include <netinet/in.h>
+        -:    8:#include <sys/socket.h>
+        -:    9:#include <arpa/inet.h>
+        -:   10:#include <sys/un.h>  // for sockaddr_un
+        -:   11:
+        -:   12:
+        -:   13:#define BUFFER_SIZE 1024
+        -:   14:
+        -:   15:using namespace std;
+        -:   16:
+       15:   17:int main(int argc, char *argv[]) {
+       15:   18:    const char* host_name = nullptr;// Host name or IP address of the server
+       15:   19:    const char* port = nullptr;// Port number
+       15:   20:    const char* uds_path = nullptr; // for UNIX domain socket path
+        -:   21:
+        -:   22:    int input;
+       37:   23:    while((input = getopt(argc, argv, "h:p:f:")) != -1) {//parse the command line arguments
+       25:   24:        switch (input) {
+       10:   25:            case 'h': // Server host
+       10:   26:                host_name = optarg;
+       10:   27:                break;
+        9:   28:            case 'p': // UDP port
+        9:   29:                port = optarg;
+        9:   30:                break;
+        3:   31:            case 'f': // UNIX domain socket path
+        3:   32:                uds_path = optarg;
+        3:   33:                break;
+        3:   34:            default:
+        3:   35:                cerr << "Usage: " << argv[0] << " -h <host_name> -p <udp_port> \n";
+        3:   36:                return 1;
+        -:   37:        }
+        -:   38:    }
+        -:   39:
+        -:   40:    // Check if both host name/port and UDS path are provided
+       12:   41:    if ((host_name || port) && uds_path) {
+        2:   42:        cerr << "Error: Cannot specify both IP/port and UDS path\n";
+        2:   43:        return 1;
+        -:   44:    }
+        -:   45:    // Check if either UDS path or host name/port is provided
+       10:   46:    if (!(uds_path || (host_name && port))) {
+        2:   47:        cerr << "Usage: " << argv[0] << " -h <host> -p <port>  OR  -f <UDS path>\n";
+        2:   48:        return 1;
+        -:   49:    }
+        -:   50:
+        -:   51:    //The user can choose what to use with- he can use TCP, UDP, UDS stream or UDS datagram I'm not prohibited this option
+        -:   52:    // if (!host_name || !port) {// Check if both UDP port and host name are specified
+        -:   53:    //     cerr << "Usage: " << argv[0] << " -h <host_name_or_ip> -p <port>\n";
+        -:   54:    //     return 1;
+        -:   55:    // }
+        -:   56:
+        -:   57:    char buffer[BUFFER_SIZE];// buffer for reading and writing
+        -:   58:
+        8:   59:    if (uds_path) {// Connect via UNIX Domain Socket
+        1:   60:        int sockfd = socket(AF_UNIX, SOCK_DGRAM, 0);
+        1:   61:        if (sockfd < 0) {// create the socket
+    #####:   62:            perror("socket");
+    #####:   63:            return 1;
+        -:   64:        }
+        -:   65:
+        -:   66:        // temporary client socket path
+        1:   67:        string client_path = "/tmp/udp_client_" + to_string(getpid());
+        -:   68:
+        1:   69:        sockaddr_un client_addr{};
+        1:   70:        client_addr.sun_family = AF_UNIX;// UNIX domain socket family
+        1:   71:        strncpy(client_addr.sun_path, client_path.c_str(), sizeof(client_addr.sun_path) - 1);
+        -:   72:
+        1:   73:        unlink(client_path.c_str()); // Remove if already exists
+        -:   74:
+        1:   75:        if (bind(sockfd, (sockaddr*)&client_addr, sizeof(client_addr)) < 0) {// bind the socket to the address and path
+    #####:   76:            perror("bind");
+    #####:   77:            return 1;
+        -:   78:        }
+        -:   79:
+        1:   80:        sockaddr_un server_addr{};
+        1:   81:        server_addr.sun_family = AF_UNIX;
+        1:   82:        strncpy(server_addr.sun_path, uds_path, sizeof(server_addr.sun_path) - 1);// copy the path to the structure
+        -:   83:
+        1:   84:        cout << "Connected to UDS-DGRAM server at " << uds_path << endl;
+        -:   85:        // main loop to read and write data
+        -:   86:        while (true) {
+       10:   87:            cout << "Enter command (e.g. DELIVER WATER 3 or 'exit'): ";//example for the user
+       10:   88:            string input;
+       10:   89:            getline(cin, input);
+        -:   90:
+       10:   91:            if (input == "exit") break;
+        -:   92:
+        9:   93:            if (sendto(sockfd, input.c_str(), input.size(), 0,
+        9:   94:                       (sockaddr*)&server_addr, sizeof(server_addr)) < 0) {// send command to server
+    #####:   95:                perror("sendto");
+    #####:   96:                break;
+        -:   97:            }
+        -:   98:
+        9:   99:            ssize_t bytes_received = recvfrom(sockfd, buffer, BUFFER_SIZE - 1, 0, nullptr, nullptr);
+        9:  100:            if (bytes_received < 0) {
+    #####:  101:                perror("recvfrom");
+    #####:  102:                break;
+        -:  103:            }
+        -:  104:
+        9:  105:            buffer[bytes_received] = '\0';// Null-terminate the buffer
+        9:  106:            cout << "Server response: " << buffer << endl;
+       19:  107:        }
+        -:  108:
+        1:  109:        close(sockfd);// Close the socket
+        1:  110:        unlink(client_path.c_str()); // Remove the temporary client socket file
+        1:  111:    }
+        -:  112:
+        -:  113:    else{// If host name and port are provided, use UDP sockets
+        -:  114:
+        -:  115:        // Set up address info for UDP
+        7:  116:        struct addrinfo hints{}, *res;
+        7:  117:        memset(&hints, 0, sizeof(hints));
+        7:  118:        hints.ai_family = AF_INET;        // IPv4
+        7:  119:        hints.ai_socktype = SOCK_DGRAM;   // UDP
+        -:  120:
+        7:  121:        int status = getaddrinfo(host_name, port, &hints, &res);//using getaddrinfo to resolve the server address
+        7:  122:        if (status != 0) {
+        2:  123:            cerr << "getaddrinfo error: " << gai_strerror(status) << endl;
+        2:  124:            return 1;
+        -:  125:        }
+        -:  126:
+        -:  127:        // Create UDP socket
+        5:  128:        int sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+        5:  129:        if (sockfd < 0) {// create the socket
+    #####:  130:            perror("socket");
+    #####:  131:            freeaddrinfo(res);
+    #####:  132:            return 1;
+        -:  133:        }
+        -:  134:
+        5:  135:        cout << "Connected to server at " << host_name << " on port " << port << " (UDP)\n";
+        -:  136:
+        -:  137:        // main loop to read and write data
+        -:  138:        while (true) {
+       14:  139:            cout << "Enter command (such as: DELIVER WATER 3 or 'exit' to quit): ";
+       14:  140:            string input;
+       14:  141:            getline(cin, input);
+        -:  142:
+       14:  143:            if (input == "exit") {//if the user types exit, then exit the loop
+        5:  144:                cout << "Exiting...\n";
+        5:  145:                break;
+        -:  146:            }
+        -:  147:
+        -:  148:            // Send command to server
+        9:  149:            if (sendto(sockfd, input.c_str(), input.size(), 0, res->ai_addr, res->ai_addrlen) < 0) {
+    #####:  150:                perror("sendto");
+    #####:  151:                break;
+        -:  152:            }
+        -:  153:
+        -:  154:            // Receive response
+        -:  155:            sockaddr_storage server_addr;
+        9:  156:            socklen_t addr_len = sizeof(server_addr);
+        9:  157:            memset(buffer, 0, BUFFER_SIZE);
+        9:  158:            ssize_t bytes_received = recvfrom(sockfd, buffer, BUFFER_SIZE - 1, 0, (sockaddr*)&server_addr, &addr_len);//using recvfrom to receive data from the UDP socket
+        9:  159:            if (bytes_received < 0) {// if there is an error in receiving data
+    #####:  160:                perror("recvfrom");
+    #####:  161:                break;
+        -:  162:            }
+        -:  163:
+        9:  164:            buffer[bytes_received] = '\0';// Null-terminate the buffer
+        9:  165:            cout << "Server response: " << buffer << "\n";
+       23:  166:        }
+        5:  167:        close(sockfd);// Close the socket
+        5:  168:        freeaddrinfo(res);// Free the address info structure
+        -:  169:    }
+        -:  170: 
+        6:  171:    cout << "Connection closed.\n";
+        6:  172:    return 0;
+        -:  173:}

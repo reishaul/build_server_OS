@@ -1,0 +1,137 @@
+        -:    0:Source:atom_supplier.cpp
+        -:    0:Graph:atom_supplier.gcno
+        -:    0:Data:atom_supplier.gcda
+        -:    0:Runs:14
+        -:    1:
+        -:    2:#include <iostream>
+        -:    3:#include <cstring>
+        -:    4:#include <cstdlib>
+        -:    5:#include <unistd.h>
+        -:    6:#include <netdb.h>
+        -:    7:#include <netinet/in.h>
+        -:    8:#include <sys/socket.h>
+        -:    9:#include <arpa/inet.h>
+        -:   10:#include <algorithm> // for to lower case conversion
+        -:   11:#include <sys/un.h>// for UNIX domain sockets
+        -:   12:
+        -:   13:// Constants
+        -:   14:#define BUFFER_SIZE 1024// size of the buffer for reading and writing
+        -:   15:
+        -:   16:using namespace std;
+        -:   17:
+        -:   18:
+       14:   19:int main(int argc, char *argv[]) {
+       14:   20:    const char* host_name = nullptr;// Host name or IP address of the server
+       14:   21:    const char* port = nullptr;// Port number
+        -:   22:    int input;
+       14:   23:    const char* uds_path = nullptr;//for UNIX domain socket path
+        -:   24:
+       35:   25:    while ((input = getopt(argc, argv, "h:p:f:")) != -1) {//parse the command line arguments
+       22:   26:        switch (input) {
+        8:   27:            case 'h':
+        8:   28:                host_name = optarg;
+        8:   29:                break;
+        8:   30:            case 'p':
+        8:   31:                port = optarg;
+        8:   32:                break;
+        5:   33:            case 'f':// get UNIX domain socket path 
+        5:   34:                uds_path = optarg; // path for UNIX domain socket
+        5:   35:                break;
+        1:   36:            default:
+        1:   37:                cerr << "Usage: " << argv[0] << " -h <host_name_or_ip> -p <port>\n";
+        1:   38:                return 1;
+        -:   39:        }
+        -:   40:    }
+        -:   41:
+       13:   42:    if ((host_name || port) && uds_path) {// Check if both host name/port and UDS path are provided
+        1:   43:        cerr << "Error: Cannot use both IP/port and UDS path\n";
+        1:   44:        return 1;
+        -:   45:    }
+        -:   46:    // Check if either UDS path or host name/port is provided
+       12:   47:    if (!(uds_path || (host_name && port))) {// Check if either UDS path or host name/port is provided
+        1:   48:        cerr << "Usage: " << argv[0] << " -h <host> -p <port>  OR  -f <uds_path>\n";
+        1:   49:        return 1;
+        -:   50:    }
+        -:   51:
+       11:   52:    int sockfd=-1;
+        -:   53:
+       11:   54:    if (uds_path) {
+        -:   55:        // Connect via UNIX Domain Socket
+        4:   56:        sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
+        4:   57:        if (sockfd < 0) {
+    #####:   58:            perror("socket");
+       3*:   59:            return 1;
+        -:   60:        }
+        -:   61:
+        4:   62:        struct sockaddr_un server_addr{};// struct for UNIX domain socket address
+        4:   63:        server_addr.sun_family = AF_UNIX;// UNIX domain socket family
+        4:   64:        strncpy(server_addr.sun_path, uds_path, sizeof(server_addr.sun_path) - 1);// copy the path to the structure
+        -:   65:
+        4:   66:        if (connect(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+        3:   67:            perror("connect");
+        3:   68:            close(sockfd);
+        3:   69:            return 1;
+        -:   70:        }
+        1:   71:        cout << "Connected to UDS server at " << uds_path << endl;
+        -:   72:    } 
+        -:   73:
+        -:   74:    else {// If host name and port are provided, use TCP sockets
+        7:   75:        struct addrinfo hints{}, *res;
+        7:   76:        memset(&hints, 0, sizeof(hints));
+        7:   77:        hints.ai_family = AF_INET;
+        7:   78:        hints.ai_socktype = SOCK_STREAM;// TCP socket type
+        -:   79:
+        7:   80:        int status = getaddrinfo(host_name, port, &hints, &res);
+        7:   81:        if (status != 0) {// if getaddrinfo fails print error and exit
+        1:   82:            cerr << "getaddrinfo failed: " << gai_strerror(status) << endl;
+        2:   83:            return 1;
+        -:   84:        }
+        -:   85:
+        6:   86:        sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);// create the socket
+        6:   87:        if (sockfd < 0) {
+    #####:   88:            perror("socket");
+    #####:   89:            freeaddrinfo(res);// free the addrinfo structure
+    #####:   90:            return 1;
+        -:   91:        }
+        -:   92:
+        6:   93:        if (connect(sockfd, res->ai_addr, res->ai_addrlen) < 0) {// connect to the server
+        1:   94:            perror("connect");
+        1:   95:            freeaddrinfo(res);// free the addrinfo structure
+        1:   96:            close(sockfd);// close the socket 
+        1:   97:            return 1;
+        -:   98:        }
+        -:   99:
+        5:  100:        cout << "Connected to server at " << host_name << " on port " << port << endl;
+        5:  101:        freeaddrinfo(res);
+        -:  102:    }
+        -:  103:
+        -:  104:
+        -:  105:    // main loop to read and write data 
+        6:  106:    char buffer[BUFFER_SIZE] = {0}; // buffer for reading and writing
+        -:  107:    while(true) {
+       36:  108:        cout << "Enter command (or 'exit' to quit): ";
+       36:  109:        string command;
+       36:  110:        getline(cin, command); // read command from user input
+        -:  111:
+       36:  112:        if (command == "exit") {
+        5:  113:            cout << "Exiting...\n";
+        5:  114:            break; // exit the loop if the user types 'exit'
+        -:  115:        }
+        -:  116:
+       31:  117:        send(sockfd, command.c_str(), command.size(), 0); // send the command to the server
+       31:  118:        memset(buffer, 0, BUFFER_SIZE); // clear buffer before reading
+        -:  119:
+       31:  120:        int valread = read(sockfd, buffer, BUFFER_SIZE); // read response from the server
+       31:  121:        if (valread <= 0) {
+        1:  122:            perror("Read error");
+        1:  123:            break;
+        -:  124:        }
+       30:  125:        buffer[valread] = '\0'; // null-terminate the buffer
+       30:  126:        cout << "Server response: " << buffer << "\n"; // print the server response
+       66:  127:    }
+        -:  128:
+        6:  129:    close(sockfd); // close the socket
+        6:  130:    cout << "Connection closed.\n";
+        6:  131:    return 0; // exit the program
+        -:  132: 
+        -:  133:}

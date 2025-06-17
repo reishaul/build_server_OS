@@ -22,6 +22,8 @@
 #include <sys/stat.h>
 #include <cerrno>
 
+#include <thread>
+#include <atomic>
 
 
 // Constants
@@ -31,6 +33,10 @@
 #define MAX_CAPACITY 1000000000000000000ULL
 std::string save_file = ""; // to hold the save file path in string format- NEW
 
+using namespace std;
+
+atomic<bool> running(true); // global variable to control the server loop, atomic for thread safety
+
 //instead of map, we use a struct to hold the inventory
 struct Inventory {
     unsigned long long carbon;
@@ -38,7 +44,7 @@ struct Inventory {
     unsigned long long oxygen;
 };
 
-using namespace std;
+
 
 /*
     * Function to get a molecule from the bank.
@@ -540,7 +546,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    std::cout << "atom_Warehouse server is listening on port " << tcp_port << "...\n";
+    cout << "TCP server is listening on port " << tcp_port << "...\n";
 
     // create UDP socket
     if ((udp_socket = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
@@ -613,10 +619,10 @@ int main(int argc, char *argv[]) {
 
         cout << "UDS datagram server is listening on " << uds_dgram_path << "\n";
     }
-
+    cout<<"type \"exit\" to close the server\n";
 
     // main loop to accept and handle client connections
-    while (true) {
+    while (running) {
 
         FD_ZERO(&read_fds); // reset the set 
         FD_SET(server_fd, &read_fds); // add the server socket 
@@ -706,6 +712,11 @@ int main(int argc, char *argv[]) {
                 else if (command == "GEN CHAMPAGNE") {// check if the command is GEN CHAMPAGNE
                     int amount = get_amount("CHAMPAGNE", inventory);
                     cout << "You can generate " << amount << " CHAMPAGNE(s)" << endl;
+                }
+                else if(command=="exit") {//NEW
+                    cout << "Exiting server...\n";
+                    running = false;
+                    break;
                 }
                 else {
                     cout << "Unknown command: " << command << endl;

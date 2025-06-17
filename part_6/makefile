@@ -1,5 +1,5 @@
 CXX = g++
-CXXFLAGS = -Wall -std=c++17 
+CXXFLAGS = -Wall -std=c++17 -fprofile-arcs -ftest-coverage -g
 
 #if we want that all the .cpp file compile
 all: drinks_bar bonus atom_supplier molecule_requester
@@ -51,9 +51,15 @@ run_molecule_requester:
 run_molecule_requester2:
 	./molecule_requester -f /tmp/sock_dgram2
 
+#clean up the coverage files
+cov_clean:
+	rm -f *.gcda *.gcno *.gcov
+
 # clean up the compiled files
 clean:
 	rm -f drinks_bar bonus atom_supplier molecule_requester 
+
+#clean up all the coverage files and compiled files
 .PHONY: all clean \
 	run_drinks_bar1 run_drinks_bar2 run_drinks_bar3 \
 	run_bonus1 run_bonus2 run_bonus3 \
